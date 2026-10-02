@@ -1,7 +1,9 @@
 /**
  * IndexedDB 持久化层（Dexie 封装）
- * - 数据结构版本号与升级迁移逻辑（v1 → v2：Coat 增加 paintType 索引并回填历史记录）
- * - 六张业务表的增删改查与整库导入导出
+ * - 数据结构版本号与升级迁移逻辑
+ *   v1 → v2：Coat 增加 paintType 索引并回填历史记录
+ *   v2 → v3：新增 roomAdmissions 入荫申请表（架位占用与排队）
+ * - 七张业务表的增删改查与整库导入导出
  * - 首次打开自动播种互相引用的演示数据（幂等）
  * 纯前端应用：不依赖任何后端服务或数据库。
  */
@@ -9,6 +11,7 @@ import Dexie, { type Table } from 'dexie';
 import type { Body } from '@/types/body';
 import type { Coat, PaintType } from '@/types/coat';
 import type { Room } from '@/types/room';
+import type { Admission } from '@/types/admission';
 import type { Polish } from '@/types/polish';
 import type { Inlay } from '@/types/inlay';
 import type { Inspect } from '@/types/inspect';
@@ -17,7 +20,7 @@ import type { Inspect } from '@/types/inspect';
 export const DB_NAME = 'gblacquer';
 
 /** 当前数据结构版本号 */
-export const DB_SCHEMA_VERSION = 2;
+export const DB_SCHEMA_VERSION = 3;
 
 /** localStorage 侧少量元数据键 */
 export const LS_KEYS = {
@@ -81,6 +84,8 @@ class LacquerDatabase extends Dexie {
   bodies!: Table<Body, string>;
   coats!: Table<Coat, string>;
   rooms!: Table<Room, string>;
+  /** 入荫申请 / 架位占用（排队中 / 在房 / 已出房） */
+  roomAdmissions!: Table<Admission, string>;
   polishes!: Table<Polish, string>;
   inlays!: Table<Inlay, string>;
   inspects!: Table<Inspect, string>;
@@ -99,7 +104,7 @@ class LacquerDatabase extends Dexie {
     });
 
     // v2：Coat 增加 paintType 索引；历史记录缺少 paintType 时按「生漆」回填
-    this.version(DB_SCHEMA_VERSION)
+    this.version(2)
       .stores({
         bodies: 'id, code, material, shape, state, updatedAt',
         coats: 'id, bodyId, seq, paintType, state, needRecheck, updatedAt',
@@ -119,13 +124,32 @@ class LacquerDatabase extends Dexie {
             if (typeof coat.thicknessUm !== 'number') coat.thicknessUm = 40;
           });
       });
+
+    // v3：新增 roomAdmissions 表（架位容量固定，入荫申请按先后排队）；老数据无需回填
+    this.version(DB_SCHEMA_VERSION).stores({
+      bodies: 'id, code, material, shape, state, updatedAt',
+      coats: 'id, bodyId, seq, paintType, state, needRecheck, updatedAt',
+      rooms: 'id, bodyId, date, verdict, updatedAt',
+      roomAdmissions: 'id, bodyId, status, queuedAt, admittedAt, exitedAt, updatedAt',
+      polishes: 'id, bodyId, seq, method, updatedAt',
+      inlays: 'id, bodyId, type, position, updatedAt',
+      inspects: 'id, bodyId, verdict, date, updatedAt',
+    });
   }
 }
 
 export const db = new LacquerDatabase();
 
-/** 六张业务表清单，事务中统一引用 */
-const TABLE_LIST = [db.bodies, db.coats, db.rooms, db.polishes, db.inlays, db.inspects];
+/** 七张业务表清单，事务中统一引用 */
+const TABLE_LIST = [
+  db.bodies,
+  db.coats,
+  db.rooms,
+  db.roomAdmissions,
+  db.polishes,
+  db.inlays,
+  db.inspects,
+];
 
 /** 生成主键：短前缀 + 时间戳 + 随机串，避免多标签页写入冲突 */
 export function createId(prefix: string): string {
@@ -181,6 +205,17 @@ export async function seedDatabase(): Promise<void> {
       createdAt: now - 86400000 * 30,
       updatedAt: now - 86400000 * 4,
     },
+    {
+      id: 'body_04',
+      code: 'LQ-2404',
+      material: 'wood',
+      shape: 'plate',
+      sizeMm: 180,
+      ownerName: '林氏委托',
+      state: 'coating',
+      createdAt: now - 86400000 * 3,
+      updatedAt: now - 86400000 * 2,
+    },
   ];
 
   const coats: Coat[] = [
@@ -192,6 +227,7 @@ export async function seedDatabase(): Promise<void> {
     { id: 'coat_0301', bodyId: 'body_03', seq: 1, paintType: 'raw', colorName: '漆黑', coatDate: '2026-02-10', thicknessUm: 38, state: 'done', needRecheck: false, createdAt: now - 86400000 * 26, updatedAt: now - 86400000 * 25 },
     { id: 'coat_0302', bodyId: 'body_03', seq: 2, paintType: 'color', colorName: '石绿', coatDate: '2026-02-18', thicknessUm: 44, state: 'done', needRecheck: false, createdAt: now - 86400000 * 20, updatedAt: now - 86400000 * 18 },
     { id: 'coat_0303', bodyId: 'body_03', seq: 3, paintType: 'topcoat', colorName: '描金', coatDate: '2026-02-26', thicknessUm: 28, state: 'done', needRecheck: false, createdAt: now - 86400000 * 14, updatedAt: now - 86400000 * 4 },
+    { id: 'coat_0401', bodyId: 'body_04', seq: 1, paintType: 'raw', colorName: '漆黑', coatDate: '2026-03-09', thicknessUm: 40, state: 'coated', needRecheck: false, createdAt: now - 86400000 * 2, updatedAt: now - 86400000 * 2 },
   ];
 
   const rooms: Room[] = [
@@ -199,6 +235,13 @@ export async function seedDatabase(): Promise<void> {
     { id: 'room_0102', bodyId: 'body_01', date: '2026-03-07', tempC: 27, humidityPct: 56, inAt: '08:30', outAt: '20:00', verdict: 'dry', createdAt: now - 86400000 * 6, updatedAt: now - 86400000 * 2 },
     { id: 'room_0201', bodyId: 'body_02', date: '2026-03-05', tempC: 23, humidityPct: 91, inAt: '10:00', outAt: '22:30', verdict: 'wet', createdAt: now - 86400000 * 5, updatedAt: now - 86400000 },
     { id: 'room_0301', bodyId: 'body_03', date: '2026-02-20', tempC: 25, humidityPct: 76, inAt: '09:30', outAt: '21:30', verdict: 'suitable', createdAt: now - 86400000 * 18, updatedAt: now - 86400000 * 18 },
+  ];
+
+  // 架位占用演示：两件在房（占满固定架位 2/2），另一件放行后排队中等空位
+  const admissions: Admission[] = [
+    { id: 'admission_01', bodyId: 'body_01', applyDate: '2026-03-08', status: 'admitted', inAt: '08:30', outAt: '', roomId: '', queuedAt: now - 86400000 * 3 - 3600000, admittedAt: now - 86400000 * 3, exitedAt: 0, createdAt: now - 86400000 * 3 - 3600000, updatedAt: now - 86400000 * 3 },
+    { id: 'admission_02', bodyId: 'body_02', applyDate: '2026-03-08', status: 'admitted', inAt: '09:10', outAt: '', roomId: '', queuedAt: now - 86400000 * 3 - 1800000, admittedAt: now - 86400000 * 3, exitedAt: 0, createdAt: now - 86400000 * 3 - 1800000, updatedAt: now - 86400000 * 3 },
+    { id: 'admission_03', bodyId: 'body_04', applyDate: '2026-03-09', status: 'waiting', inAt: '', outAt: '', roomId: '', queuedAt: now - 86400000 * 2, admittedAt: 0, exitedAt: 0, createdAt: now - 86400000 * 2, updatedAt: now - 86400000 * 2 },
   ];
 
   const polishes: Polish[] = [
@@ -224,6 +267,7 @@ export async function seedDatabase(): Promise<void> {
     await db.bodies.bulkPut(bodies);
     await db.coats.bulkPut(coats);
     await db.rooms.bulkPut(rooms);
+    await db.roomAdmissions.bulkPut(admissions);
     await db.polishes.bulkPut(polishes);
     await db.inlays.bulkPut(inlays);
     await db.inspects.bulkPut(inspects);
@@ -239,16 +283,18 @@ export interface LacquerSnapshot {
   bodies: Body[];
   coats: Coat[];
   rooms: Room[];
+  roomAdmissions: Admission[];
   polishes: Polish[];
   inlays: Inlay[];
   inspects: Inspect[];
 }
 
 export async function exportSnapshot(): Promise<LacquerSnapshot> {
-  const [bodies, coats, rooms, polishes, inlays, inspects] = await Promise.all([
+  const [bodies, coats, rooms, roomAdmissions, polishes, inlays, inspects] = await Promise.all([
     db.bodies.toArray(),
     db.coats.toArray(),
     db.rooms.toArray(),
+    db.roomAdmissions.toArray(),
     db.polishes.toArray(),
     db.inlays.toArray(),
     db.inspects.toArray(),
@@ -260,6 +306,7 @@ export async function exportSnapshot(): Promise<LacquerSnapshot> {
     bodies,
     coats,
     rooms,
+    roomAdmissions,
     polishes,
     inlays,
     inspects,
@@ -271,7 +318,7 @@ export function validateSnapshot(input: unknown): string {
   if (typeof input !== 'object' || input === null) return '文件内容不是合法的 JSON 对象';
   const snapshot = input as Partial<LacquerSnapshot>;
   if (snapshot.app !== DB_NAME) return `备份文件不属于本项目（app=${String(snapshot.app)}）`;
-  const keys: Array<keyof LacquerSnapshot> = ['bodies', 'coats', 'rooms', 'polishes', 'inlays', 'inspects'];
+  const keys: Array<keyof LacquerSnapshot> = ['bodies', 'coats', 'rooms', 'roomAdmissions', 'polishes', 'inlays', 'inspects'];
   for (const key of keys) {
     if (!Array.isArray(snapshot[key])) return `备份文件缺少 ${String(key)} 集合`;
   }
@@ -284,6 +331,7 @@ export async function importSnapshot(snapshot: LacquerSnapshot): Promise<void> {
     await db.bodies.bulkPut(snapshot.bodies);
     await db.coats.bulkPut(snapshot.coats);
     await db.rooms.bulkPut(snapshot.rooms);
+    await db.roomAdmissions.bulkPut(snapshot.roomAdmissions);
     await db.polishes.bulkPut(snapshot.polishes);
     await db.inlays.bulkPut(snapshot.inlays);
     await db.inspects.bulkPut(snapshot.inspects);
@@ -296,6 +344,7 @@ export async function clearAllTables(): Promise<void> {
       db.bodies.clear(),
       db.coats.clear(),
       db.rooms.clear(),
+      db.roomAdmissions.clear(),
       db.polishes.clear(),
       db.inlays.clear(),
       db.inspects.clear(),
@@ -310,15 +359,16 @@ export async function resetDatabase(): Promise<void> {
 }
 
 export async function countAll(): Promise<Record<string, number>> {
-  const [bodies, coats, rooms, polishes, inlays, inspects] = await Promise.all([
+  const [bodies, coats, rooms, roomAdmissions, polishes, inlays, inspects] = await Promise.all([
     db.bodies.count(),
     db.coats.count(),
     db.rooms.count(),
+    db.roomAdmissions.count(),
     db.polishes.count(),
     db.inlays.count(),
     db.inspects.count(),
   ]);
-  return { bodies, coats, rooms, polishes, inlays, inspects };
+  return { bodies, coats, rooms, roomAdmissions, polishes, inlays, inspects };
 }
 
 /* ------------------------------ 级联删除 ------------------------------ */
@@ -327,6 +377,7 @@ export async function removeBodyCascade(bodyId: string): Promise<void> {
   await db.transaction('rw', TABLE_LIST, async () => {
     await db.coats.where('bodyId').equals(bodyId).delete();
     await db.rooms.where('bodyId').equals(bodyId).delete();
+    await db.roomAdmissions.where('bodyId').equals(bodyId).delete();
     await db.polishes.where('bodyId').equals(bodyId).delete();
     await db.inlays.where('bodyId').equals(bodyId).delete();
     await db.inspects.where('bodyId').equals(bodyId).delete();

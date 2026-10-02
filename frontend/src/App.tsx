@@ -16,10 +16,11 @@ import {
 } from '@ant-design/icons';
 import { ROUTES } from './router';
 import { useBodyStore } from './stores/bodyStore';
-import { useCoatStore } from './stores/coatStore';
+import { useCoatStore, syncRecheckOnceReady } from './stores/coatStore';
 import { useRoomStore } from './stores/roomStore';
 import { initDatabase } from './utils/db';
 import { BODY_MATERIAL_LABEL, BODY_SHAPE_LABEL, BODY_STATE_LABEL } from './types/body';
+import { ROOM_SHELF_CAPACITY } from './types/admission';
 
 const { Header, Sider, Content, Footer } = Layout;
 
@@ -35,6 +36,8 @@ export default function App() {
   const loadCoats = useCoatStore((state) => state.loadCoats);
   const rooms = useRoomStore((state) => state.rooms);
   const loadRooms = useRoomStore((state) => state.loadRooms);
+  const admissions = useRoomStore((state) => state.admissions);
+  const loadAdmissions = useRoomStore((state) => state.loadAdmissions);
 
   useEffect(() => {
     let cancelled = false;
@@ -42,7 +45,10 @@ export default function App() {
       try {
         await initDatabase();
         if (cancelled) return;
-        await Promise.all([loadBodies(), loadCoats(), loadRooms()]);
+        await Promise.all([loadBodies(), loadCoats(), loadRooms(), loadAdmissions()]);
+        if (cancelled) return;
+        // 两侧都就绪后，髹涂侧按荫房判定补一次待复检同步
+        await syncRecheckOnceReady();
       } catch (error) {
         if (cancelled) return;
         message.error(`本地数据库初始化失败：${error instanceof Error ? error.message : '未知错误'}`);
@@ -51,7 +57,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [loadBodies, loadCoats, loadRooms, message]);
+  }, [loadBodies, loadCoats, loadRooms, loadAdmissions, message]);
 
   const currentBody = bodies.find((body) => body.id === currentBodyId) ?? null;
   const selectedKey = location.pathname.startsWith('/coats')
@@ -98,7 +104,11 @@ export default function App() {
               <DashboardOutlined /> 胎体 {bodies.length} 件
             </span>
             <span>髹涂道次 {coats.length} 道</span>
-            <span>荫房记录 {rooms.length} 条</span>
+            <span>
+              荫房架位 {admissions.filter((item) => item.status === 'admitted').length}/{ROOM_SHELF_CAPACITY} · 排队{' '}
+              {admissions.filter((item) => item.status === 'waiting').length} 件
+            </span>
+            <span>温湿度记录 {rooms.length} 条</span>
           </Space>
         </div>
       </Sider>

@@ -1,6 +1,9 @@
 /**
- * 髹涂道次状态管理（Zustand）
+ * 髹涂组侧状态管理（Zustand）
  * 维护道次顺序与状态推进，支持拖拽重排落库重编号、批量改漆种与状态。
+ * 本侧职责（只写 coats 表）：
+ * - 放行道次入荫：调用荫房侧申请接口；满位排队时道次留在本侧，可重试
+ * - 待复检：单向订阅荫房温湿度判定，偏干/偏湿涉及的道次回到待复检，由髹涂组处理
  */
 import { create } from 'zustand';
 import { db, createId } from '@/utils/db';
@@ -8,6 +11,7 @@ import type { Coat, CoatDraft, CoatState, PaintType } from '@/types/coat';
 import { nextCoatState } from '@/types/coat';
 import { suggestIntervalHours, suggestPaintType } from '@/utils/humidity';
 import { useBodyStore } from './bodyStore';
+import { useRoomStore, type AdmissionApplyResult } from './roomStore';
 
 export interface PaintSuggestion {
   paintType: PaintType;
@@ -28,7 +32,12 @@ interface CoatStoreState {
   removeCoat: (id: string) => Promise<void>;
   batchUpdate: (ids: string[], patch: Partial<Coat>) => Promise<void>;
   advanceState: (id: string) => Promise<void>;
+  /** 髹涂组手动处理复检（清除 / 标记），只写本侧 */
   markRecheck: (bodyId: string, recheck: boolean) => Promise<void>;
+  /** 放行道次入荫：申请由荫房侧落库；满位则票据排队、道次退回本侧重试 */
+  releaseToRoom: (bodyId: string) => Promise<AdmissionApplyResult>;
+  /** 读荫房侧只读判定，把偏干/偏湿涉及的未完成道次置为待复检（只置位、不清除） */
+  syncRecheckFromRooms: () => Promise<void>;
   reorderCoats: (bodyId: string, orderedIds: string[]) => Promise<void>;
   nextSeq: (bodyId: string) => number;
   /** 同器型自动带出上次漆种与间隔建议 */
@@ -111,6 +120,29 @@ export const useCoatStore = create<CoatStoreState>((set, get) => ({
     await get().loadCoats();
   },
 
+  async releaseToRoom(bodyId) {
+    // 放行是髹涂组的动作；入荫票据与架位占用写在荫房侧，本侧不代写
+    const applyDate = new Date().toISOString().slice(0, 10);
+    return useRoomStore.getState().applyAdmission({ bodyId, applyDate });
+  },
+
+  async syncRecheckFromRooms() {
+    // 只读荫房侧判定：偏干 / 偏湿涉及胎体的未完成道次回到待复检，等髹涂组处理。
+    // 只置位不清除——复检结论与清除由髹涂组手动做，避免把已处理的标记又翻回来。
+    const { rooms } = useRoomStore.getState();
+    const abnormalBodyIds = new Set(
+      rooms.filter((room) => room.verdict !== 'suitable').map((room) => room.bodyId),
+    );
+    if (abnormalBodyIds.size === 0) return;
+    const now = Date.now();
+    const toMark = get()
+      .coats.filter((coat) => abnormalBodyIds.has(coat.bodyId) && coat.state !== 'done' && !coat.needRecheck)
+      .map((coat) => ({ ...coat, needRecheck: true, updatedAt: now }));
+    if (toMark.length === 0) return;
+    await db.coats.bulkPut(toMark);
+    await get().loadCoats();
+  },
+
   async reorderCoats(bodyId, orderedIds) {
     const indexOf = new Map(orderedIds.map((id, index) => [id, index]));
     const rows = get()
@@ -149,6 +181,26 @@ export const useCoatStore = create<CoatStoreState>((set, get) => ({
     };
   },
 }));
+
+/**
+ * 单向同步：荫房值班只落温湿度判定；判定变化后由髹涂组侧（本文件）
+ * 把偏干 / 偏湿涉及的道次置为待复检。依赖方向仅 coat → room，room 侧不 import coat 侧。
+ */
+let lastRoomsRef: unknown[] | null = null;
+let roomSyncReady = false;
+useRoomStore.subscribe((state) => {
+  if (state.rooms === lastRoomsRef) return;
+  lastRoomsRef = state.rooms;
+  roomSyncReady = true;
+  void useCoatStore.getState().syncRecheckFromRooms();
+});
+
+/** 首屏载入顺序不保证 room 先就绪；App 初始化完成后补同步一次 */
+export async function syncRecheckOnceReady(): Promise<void> {
+  if (roomSyncReady) return;
+  roomSyncReady = true;
+  await useCoatStore.getState().syncRecheckFromRooms();
+}
 
 /** 道次派生选择器：按状态集合过滤 */
 export function selectCoatsByStates(coats: Coat[], states: CoatState[]): Coat[] {

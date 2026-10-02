@@ -23,10 +23,12 @@ import {
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import {
+  CheckCircleOutlined,
   DeleteOutlined,
   EditOutlined,
   HolderOutlined,
   PlusOutlined,
+  SendOutlined,
   ThunderboltOutlined,
 } from '@ant-design/icons';
 import EmptyPanel from '@/components/common/EmptyPanel';
@@ -36,6 +38,8 @@ import StageTag from '@/components/common/StageTag';
 import { useCoatProgress } from '@/hooks/useCoatProgress';
 import { useBodyStore } from '@/stores/bodyStore';
 import { useCoatStore } from '@/stores/coatStore';
+import { useRoomStore } from '@/stores/roomStore';
+import { ROOM_SHELF_CAPACITY } from '@/types/admission';
 import {
   COAT_STATE_LABEL,
   COAT_STATE_OPTIONS,
@@ -74,6 +78,13 @@ export default function CoatBoard() {
   const reorderCoats = useCoatStore((state) => state.reorderCoats);
   const nextSeq = useCoatStore((state) => state.nextSeq);
   const suggestForBody = useCoatStore((state) => state.suggestForBody);
+  const releaseToRoom = useCoatStore((state) => state.releaseToRoom);
+  const markRecheck = useCoatStore((state) => state.markRecheck);
+
+  // 只读荫房侧票据，用于显示在房 / 排队与前方积压件数；放行写动作走髹涂侧 releaseToRoom
+  const admissions = useRoomStore((state) => state.admissions);
+  const occupiedCount = useRoomStore((state) => state.occupiedCount);
+  const aheadCountOf = useRoomStore((state) => state.aheadCountOf);
 
   const { progressOf, currentCoatText, totals } = useCoatProgress();
   const url = useFilterQuery(FILTER_KEYS);
@@ -188,6 +199,39 @@ export default function CoatBoard() {
     await advanceState(coat.id);
   };
 
+  /** 髹涂组放行入荫：满位时票据已在荫房侧排队，道次留在本侧，可按本侧按钮重试 */
+  const handleRelease = async (coat: Coat): Promise<void> => {
+    const result = await releaseToRoom(coat.bodyId);
+    if (result.outcome === 'admitted') {
+      message.success(`第 ${coat.seq} 道已放行进荫房，占架 ${occupiedCount()}/${ROOM_SHELF_CAPACITY}`);
+    } else {
+      message.warning(
+        `架位已满，入荫申请已排队；前面还压着 ${result.aheadCount} 件，空位让出后可点「重试放行」。已入房的道次照旧。`,
+      );
+    }
+  };
+
+  /** 髹涂组处理完复检后清除本侧标记 */
+  const handleResolveRecheck = async (coat: Coat): Promise<void> => {
+    await markRecheck(coat.bodyId, false);
+    message.success('已清除该胎体待复检标记，请按正常工序推进');
+  };
+
+  /** bodyId → 当前有效入荫票据（排队中 / 在房），同体多道共享一件胎体的架位状态 */
+  const admissionByBody = useMemo(() => {
+    const map = new Map<string, (typeof admissions)[number]>();
+    admissions
+      .filter((item) => item.status !== 'exited')
+      .sort((a, b) => b.createdAt - a.createdAt)
+      .forEach((item) => {
+        if (!map.has(item.bodyId)) map.set(item.bodyId, item);
+      });
+    return map;
+  }, [admissions]);
+
+  /** 当前胎体待复检道次数（复检是髹涂侧状态，由本侧处理清除） */
+  const bodyRecheckCount = bodyCoats.filter((coat) => coat.needRecheck).length;
+
   const columns: ColumnsType<Coat> = [
     {
       title: '',
@@ -228,14 +272,63 @@ export default function CoatBoard() {
       render: (value: number) => `${value} μm`,
     },
     {
+      title: '荫房放行',
+      key: 'admission',
+      width: 150,
+      render: (_value, record) => {
+        if (record.state === 'done') return <Typography.Text type="secondary">—</Typography.Text>;
+        const ticket = admissionByBody.get(record.bodyId);
+        if (ticket?.status === 'admitted') {
+          return <Tag color="#8c2f1f">在房 · {ticket.inAt || '已入位'}</Tag>;
+        }
+        if (ticket?.status === 'waiting') {
+          const ahead = aheadCountOf(ticket.id);
+          return (
+            <Tooltip title={`入荫申请已按先后排队，前面还压着 ${ahead} 件；空位让出后重试即可入位`}>
+              <Tag color="gold">排队中 · 前压 {ahead} 件</Tag>
+            </Tooltip>
+          );
+        }
+        return (
+          <Button
+            size="small"
+            type="link"
+            icon={<SendOutlined />}
+            disabled={record.state === 'todo'}
+            onClick={() => void handleRelease(record)}
+          >
+            放行入荫
+          </Button>
+        );
+      },
+    },
+    {
       title: '操作',
       key: 'action',
-      width: 220,
+      width: 300,
       render: (_value, record) => (
         <Space size={4} wrap>
           <Button size="small" type="link" onClick={() => void handleAdvance(record)}>
             推进状态
           </Button>
+          {admissionByBody.get(record.bodyId)?.status === 'waiting' ? (
+            <Button size="small" type="link" icon={<SendOutlined />} onClick={() => void handleRelease(record)}>
+              重试放行
+            </Button>
+          ) : null}
+          {record.needRecheck ? (
+            <Popconfirm
+              title="复检处理"
+              description="确认该胎体待复检道次已按髹涂组意见处理完，清除标记？"
+              okText="已处理，清除"
+              cancelText="取消"
+              onConfirm={() => void handleResolveRecheck(record)}
+            >
+              <Button size="small" type="link" icon={<CheckCircleOutlined />}>
+                复检处理
+              </Button>
+            </Popconfirm>
+          ) : null}
           <Button size="small" type="link" icon={<EditOutlined />} onClick={() => openEdit(record)}>
             编辑
           </Button>
@@ -260,7 +353,9 @@ export default function CoatBoard() {
       <div className="gb-page-head">
         <div>
           <h2>髹涂道次编排</h2>
-          <p>逐道登记漆种与色名，拖拽调整先后顺序；批量改漆种或状态，同器型自动带出上次做法。</p>
+          <p>
+            逐道登记漆种与色名，拖拽调整先后顺序；髹涂组负责放行入荫与复检处理，架位满时入荫申请在荫房侧排队、本侧可重试。
+          </p>
         </div>
         <Space wrap>
           <Select
@@ -307,6 +402,15 @@ export default function CoatBoard() {
               带出建议
             </Button>
           }
+        />
+      ) : null}
+
+      {bodyRecheckCount > 0 ? (
+        <Alert
+          type="warning"
+          showIcon
+          style={{ marginBottom: 14 }}
+          message={`荫房温湿度判为偏干 / 偏湿，本胎体有 ${bodyRecheckCount} 道回到待复检，请髹涂组处理后点「复检处理」清除标记。`}
         />
       ) : null}
 
