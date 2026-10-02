@@ -28,6 +28,8 @@ import {
   HolderOutlined,
   PlusOutlined,
   ThunderboltOutlined,
+  CheckCircleOutlined,
+  ReloadOutlined,
 } from '@ant-design/icons';
 import EmptyPanel from '@/components/common/EmptyPanel';
 import FilterBar, { useFilterQuery, type FilterSelectConfig } from '@/components/common/FilterBar';
@@ -74,9 +76,16 @@ export default function CoatBoard() {
   const reorderCoats = useCoatStore((state) => state.reorderCoats);
   const nextSeq = useCoatStore((state) => state.nextSeq);
   const suggestForBody = useCoatStore((state) => state.suggestForBody);
+  const syncRecheckFromRooms = useCoatStore((state) => state.syncRecheckFromRooms);
+  const releaseRecheck = useCoatStore((state) => state.releaseRecheck);
 
   const { progressOf, currentCoatText, totals } = useCoatProgress();
   const url = useFilterQuery(FILTER_KEYS);
+
+  useEffect(() => {
+    // 进入道次页时同步一次荫房异常（只读荫房记录，只写道次待复检）
+    void syncRecheckFromRooms();
+  }, [syncRecheckFromRooms]);
 
   const [editing, setEditing] = useState<Coat | null>(null);
   const [open, setOpen] = useState(false);
@@ -273,6 +282,23 @@ export default function CoatBoard() {
             }))}
             onChange={(value: string) => setCurrentBodyId(value)}
           />
+          <Button
+            icon={<ReloadOutlined />}
+            onClick={() =>
+              void syncRecheckFromRooms().then(() => message.success('已同步荫房异常，偏干偏湿道次转待复检'))
+            }
+          >
+            同步荫房异常
+          </Button>
+          <Button
+            icon={<CheckCircleOutlined />}
+            disabled={!bodyId}
+            onClick={() =>
+              void releaseRecheck(bodyId).then(() => message.success('已放行当前胎体的待复检道次'))
+            }
+          >
+            放行待复检
+          </Button>
           <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>
             新增道次
           </Button>

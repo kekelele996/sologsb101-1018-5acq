@@ -33,8 +33,10 @@ export default function App() {
   const loadBodies = useBodyStore((state) => state.loadBodies);
   const coats = useCoatStore((state) => state.coats);
   const loadCoats = useCoatStore((state) => state.loadCoats);
+  const syncRecheckFromRooms = useCoatStore((state) => state.syncRecheckFromRooms);
   const rooms = useRoomStore((state) => state.rooms);
   const loadRooms = useRoomStore((state) => state.loadRooms);
+  const loadDryingEntries = useRoomStore((state) => state.loadDryingEntries);
 
   useEffect(() => {
     let cancelled = false;
@@ -42,7 +44,10 @@ export default function App() {
       try {
         await initDatabase();
         if (cancelled) return;
-        await Promise.all([loadBodies(), loadCoats(), loadRooms()]);
+        await Promise.all([loadBodies(), loadCoats(), loadRooms(), loadDryingEntries()]);
+        if (cancelled) return;
+        // 启动后由髹涂组侧同步一次荫房异常（只读荫房记录，只写道次待复检）
+        await syncRecheckFromRooms();
       } catch (error) {
         if (cancelled) return;
         message.error(`本地数据库初始化失败：${error instanceof Error ? error.message : '未知错误'}`);
@@ -51,9 +56,11 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [loadBodies, loadCoats, loadRooms, message]);
+  }, [loadBodies, loadCoats, loadRooms, loadDryingEntries, syncRecheckFromRooms, message]);
 
   const currentBody = bodies.find((body) => body.id === currentBodyId) ?? null;
+  const inRoomCount = useRoomStore((state) => state.dryingEntries).filter((entry) => entry.status === 'inRoom').length;
+  const queuedCount = useRoomStore((state) => state.dryingEntries).filter((entry) => entry.status === 'queued').length;
   const selectedKey = location.pathname.startsWith('/coats')
     ? ROUTES.coats
     : location.pathname.startsWith('/rooms')
@@ -99,6 +106,9 @@ export default function App() {
             </span>
             <span>髹涂道次 {coats.length} 道</span>
             <span>荫房记录 {rooms.length} 条</span>
+            <span>
+              架位在房 {inRoomCount} · 排队 {queuedCount}
+            </span>
           </Space>
         </div>
       </Sider>

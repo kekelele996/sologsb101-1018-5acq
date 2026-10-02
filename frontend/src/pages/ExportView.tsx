@@ -74,6 +74,7 @@ export default function ExportView() {
   const loadCoats = useCoatStore((state) => state.loadCoats);
   const rooms = useRoomStore((state) => state.rooms);
   const loadRooms = useRoomStore((state) => state.loadRooms);
+  const loadDryingEntries = useRoomStore((state) => state.loadDryingEntries);
 
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<Inspect | null>(null);
@@ -176,7 +177,7 @@ export default function ExportView() {
       cancelText: '取消',
       onOk: async () => {
         await importSnapshot(parsed as LacquerSnapshot);
-        await Promise.all([loadBodies(), loadCoats(), loadRooms()]);
+        await Promise.all([loadBodies(), loadCoats(), loadRooms(), loadDryingEntries()]);
         message.success('导入完成，数据已覆盖');
       },
     });
@@ -184,7 +185,7 @@ export default function ExportView() {
 
   const handleReset = async (): Promise<void> => {
     await resetDatabase();
-    await Promise.all([loadBodies(), loadCoats(), loadRooms()]);
+    await Promise.all([loadBodies(), loadCoats(), loadRooms(), loadDryingEntries()]);
     message.success('已清空并重新载入演示数据');
   };
 
@@ -372,7 +373,7 @@ export default function ExportView() {
           <Card title="整库导出" style={{ marginTop: 16 }}>
             <Space direction="vertical" size={10} style={{ width: '100%' }}>
               <Typography.Text type="secondary">
-                导出文件包含 6 张业务表全量数据与结构版本号，可在其他设备通过「导入 JSON」还原。
+                导出文件包含 7 张业务表（含入荫申请与架位占用）全量数据与结构版本号，可在其他设备通过「导入 JSON」还原。
               </Typography.Text>
               <Space wrap>
                 <Button icon={<CloudDownloadOutlined />} onClick={() => void handleExport()}>

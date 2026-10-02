@@ -9,6 +9,7 @@ import Dexie, { type Table } from 'dexie';
 import type { Body } from '@/types/body';
 import type { Coat, PaintType } from '@/types/coat';
 import type { Room } from '@/types/room';
+import type { DryingEntry } from '@/types/drying';
 import type { Polish } from '@/types/polish';
 import type { Inlay } from '@/types/inlay';
 import type { Inspect } from '@/types/inspect';
@@ -17,7 +18,7 @@ import type { Inspect } from '@/types/inspect';
 export const DB_NAME = 'gblacquer';
 
 /** 当前数据结构版本号 */
-export const DB_SCHEMA_VERSION = 2;
+export const DB_SCHEMA_VERSION = 3;
 
 /** localStorage 侧少量元数据键 */
 export const LS_KEYS = {
@@ -81,6 +82,7 @@ class LacquerDatabase extends Dexie {
   bodies!: Table<Body, string>;
   coats!: Table<Coat, string>;
   rooms!: Table<Room, string>;
+  dryingEntries!: Table<DryingEntry, string>;
   polishes!: Table<Polish, string>;
   inlays!: Table<Inlay, string>;
   inspects!: Table<Inspect, string>;
@@ -99,7 +101,7 @@ class LacquerDatabase extends Dexie {
     });
 
     // v2：Coat 增加 paintType 索引；历史记录缺少 paintType 时按「生漆」回填
-    this.version(DB_SCHEMA_VERSION)
+    this.version(2)
       .stores({
         bodies: 'id, code, material, shape, state, updatedAt',
         coats: 'id, bodyId, seq, paintType, state, needRecheck, updatedAt',
@@ -119,13 +121,24 @@ class LacquerDatabase extends Dexie {
             if (typeof coat.thicknessUm !== 'number') coat.thicknessUm = 40;
           });
       });
+
+    // v3：新增 dryingEntries（入荫申请 / 架位占用）表，与温湿度记录分离
+    this.version(DB_SCHEMA_VERSION).stores({
+      bodies: 'id, code, material, shape, state, updatedAt',
+      coats: 'id, bodyId, seq, paintType, state, needRecheck, updatedAt',
+      rooms: 'id, bodyId, date, verdict, updatedAt',
+      dryingEntries: 'id, bodyId, status, queueNo, slotNo, updatedAt',
+      polishes: 'id, bodyId, seq, method, updatedAt',
+      inlays: 'id, bodyId, type, position, updatedAt',
+      inspects: 'id, bodyId, verdict, date, updatedAt',
+    });
   }
 }
 
 export const db = new LacquerDatabase();
 
-/** 六张业务表清单，事务中统一引用 */
-const TABLE_LIST = [db.bodies, db.coats, db.rooms, db.polishes, db.inlays, db.inspects];
+/** 七张业务表清单，事务中统一引用 */
+const TABLE_LIST = [db.bodies, db.coats, db.rooms, db.dryingEntries, db.polishes, db.inlays, db.inspects];
 
 /** 生成主键：短前缀 + 时间戳 + 随机串，避免多标签页写入冲突 */
 export function createId(prefix: string): string {
@@ -181,6 +194,17 @@ export async function seedDatabase(): Promise<void> {
       createdAt: now - 86400000 * 30,
       updatedAt: now - 86400000 * 4,
     },
+    {
+      id: 'body_04',
+      code: 'LQ-2404',
+      material: 'wood',
+      shape: 'plate',
+      sizeMm: 180,
+      ownerName: '待荫干',
+      state: 'drying',
+      createdAt: now - 86400000 * 3,
+      updatedAt: now - 86400000,
+    },
   ];
 
   const coats: Coat[] = [
@@ -199,6 +223,38 @@ export async function seedDatabase(): Promise<void> {
     { id: 'room_0102', bodyId: 'body_01', date: '2026-03-07', tempC: 27, humidityPct: 56, inAt: '08:30', outAt: '20:00', verdict: 'dry', createdAt: now - 86400000 * 6, updatedAt: now - 86400000 * 2 },
     { id: 'room_0201', bodyId: 'body_02', date: '2026-03-05', tempC: 23, humidityPct: 91, inAt: '10:00', outAt: '22:30', verdict: 'wet', createdAt: now - 86400000 * 5, updatedAt: now - 86400000 },
     { id: 'room_0301', bodyId: 'body_03', date: '2026-02-20', tempC: 25, humidityPct: 76, inAt: '09:30', outAt: '21:30', verdict: 'suitable', createdAt: now - 86400000 * 18, updatedAt: now - 86400000 * 18 },
+  ];
+
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const today = new Date();
+  const todayStr = `${today.getFullYear()}-${pad(today.getMonth() + 1)}-${pad(today.getDate())}`;
+  const dryingEntries: DryingEntry[] = [
+    {
+      id: 'entry_0201',
+      bodyId: 'body_02',
+      queueNo: 1,
+      status: 'inRoom',
+      slotNo: 1,
+      inAt: `${todayStr} 09:00`,
+      outAt: null,
+      roomId: 'room_0201',
+      rejectReason: '',
+      createdAt: now - 86400000,
+      updatedAt: now - 86400000,
+    },
+    {
+      id: 'entry_0401',
+      bodyId: 'body_04',
+      queueNo: 2,
+      status: 'queued',
+      slotNo: null,
+      inAt: null,
+      outAt: null,
+      roomId: null,
+      rejectReason: '',
+      createdAt: now - 3600000,
+      updatedAt: now - 3600000,
+    },
   ];
 
   const polishes: Polish[] = [
@@ -224,6 +280,7 @@ export async function seedDatabase(): Promise<void> {
     await db.bodies.bulkPut(bodies);
     await db.coats.bulkPut(coats);
     await db.rooms.bulkPut(rooms);
+    await db.dryingEntries.bulkPut(dryingEntries);
     await db.polishes.bulkPut(polishes);
     await db.inlays.bulkPut(inlays);
     await db.inspects.bulkPut(inspects);
@@ -239,16 +296,18 @@ export interface LacquerSnapshot {
   bodies: Body[];
   coats: Coat[];
   rooms: Room[];
+  dryingEntries: DryingEntry[];
   polishes: Polish[];
   inlays: Inlay[];
   inspects: Inspect[];
 }
 
 export async function exportSnapshot(): Promise<LacquerSnapshot> {
-  const [bodies, coats, rooms, polishes, inlays, inspects] = await Promise.all([
+  const [bodies, coats, rooms, dryingEntries, polishes, inlays, inspects] = await Promise.all([
     db.bodies.toArray(),
     db.coats.toArray(),
     db.rooms.toArray(),
+    db.dryingEntries.toArray(),
     db.polishes.toArray(),
     db.inlays.toArray(),
     db.inspects.toArray(),
@@ -260,6 +319,7 @@ export async function exportSnapshot(): Promise<LacquerSnapshot> {
     bodies,
     coats,
     rooms,
+    dryingEntries,
     polishes,
     inlays,
     inspects,
@@ -271,7 +331,15 @@ export function validateSnapshot(input: unknown): string {
   if (typeof input !== 'object' || input === null) return '文件内容不是合法的 JSON 对象';
   const snapshot = input as Partial<LacquerSnapshot>;
   if (snapshot.app !== DB_NAME) return `备份文件不属于本项目（app=${String(snapshot.app)}）`;
-  const keys: Array<keyof LacquerSnapshot> = ['bodies', 'coats', 'rooms', 'polishes', 'inlays', 'inspects'];
+  const keys: Array<keyof LacquerSnapshot> = [
+    'bodies',
+    'coats',
+    'rooms',
+    'dryingEntries',
+    'polishes',
+    'inlays',
+    'inspects',
+  ];
   for (const key of keys) {
     if (!Array.isArray(snapshot[key])) return `备份文件缺少 ${String(key)} 集合`;
   }
@@ -284,6 +352,7 @@ export async function importSnapshot(snapshot: LacquerSnapshot): Promise<void> {
     await db.bodies.bulkPut(snapshot.bodies);
     await db.coats.bulkPut(snapshot.coats);
     await db.rooms.bulkPut(snapshot.rooms);
+    await db.dryingEntries.bulkPut(snapshot.dryingEntries);
     await db.polishes.bulkPut(snapshot.polishes);
     await db.inlays.bulkPut(snapshot.inlays);
     await db.inspects.bulkPut(snapshot.inspects);
@@ -296,6 +365,7 @@ export async function clearAllTables(): Promise<void> {
       db.bodies.clear(),
       db.coats.clear(),
       db.rooms.clear(),
+      db.dryingEntries.clear(),
       db.polishes.clear(),
       db.inlays.clear(),
       db.inspects.clear(),
@@ -310,15 +380,16 @@ export async function resetDatabase(): Promise<void> {
 }
 
 export async function countAll(): Promise<Record<string, number>> {
-  const [bodies, coats, rooms, polishes, inlays, inspects] = await Promise.all([
+  const [bodies, coats, rooms, dryingEntries, polishes, inlays, inspects] = await Promise.all([
     db.bodies.count(),
     db.coats.count(),
     db.rooms.count(),
+    db.dryingEntries.count(),
     db.polishes.count(),
     db.inlays.count(),
     db.inspects.count(),
   ]);
-  return { bodies, coats, rooms, polishes, inlays, inspects };
+  return { bodies, coats, rooms, dryingEntries, polishes, inlays, inspects };
 }
 
 /* ------------------------------ 级联删除 ------------------------------ */
@@ -327,6 +398,7 @@ export async function removeBodyCascade(bodyId: string): Promise<void> {
   await db.transaction('rw', TABLE_LIST, async () => {
     await db.coats.where('bodyId').equals(bodyId).delete();
     await db.rooms.where('bodyId').equals(bodyId).delete();
+    await db.dryingEntries.where('bodyId').equals(bodyId).delete();
     await db.polishes.where('bodyId').equals(bodyId).delete();
     await db.inlays.where('bodyId').equals(bodyId).delete();
     await db.inspects.where('bodyId').equals(bodyId).delete();

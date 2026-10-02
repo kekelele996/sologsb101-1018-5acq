@@ -1,6 +1,8 @@
 /**
  * 髹涂道次状态管理（Zustand）
- * 维护道次顺序与状态推进，支持拖拽重排落库重编号、批量改漆种与状态。
+ * 髹涂组侧职责：维护道次顺序与状态推进、待复检标记与放行。
+ * 只写道次表；荫房温湿度越界时，由本侧读取荫房记录（只读）后自行把关联道次置为待复检，
+ * 荫房侧不反向写入道次。放行（releaseRecheck）是髹涂组的显式动作。
  */
 import { create } from 'zustand';
 import { db, createId } from '@/utils/db';
@@ -8,6 +10,7 @@ import type { Coat, CoatDraft, CoatState, PaintType } from '@/types/coat';
 import { nextCoatState } from '@/types/coat';
 import { suggestIntervalHours, suggestPaintType } from '@/utils/humidity';
 import { useBodyStore } from './bodyStore';
+import { useRoomStore } from './roomStore';
 
 export interface PaintSuggestion {
   paintType: PaintType;
@@ -28,12 +31,18 @@ interface CoatStoreState {
   removeCoat: (id: string) => Promise<void>;
   batchUpdate: (ids: string[], patch: Partial<Coat>) => Promise<void>;
   advanceState: (id: string) => Promise<void>;
-  markRecheck: (bodyId: string, recheck: boolean) => Promise<void>;
+  /** 同步荫房异常：读取荫房记录（只读），把偏干 / 偏湿胎体的未完成道次置为待复检（只写道次） */
+  syncRecheckFromRooms: () => Promise<void>;
+  /** 髹涂组放行：清除该胎体的待复检标记 */
+  releaseRecheck: (bodyId: string) => Promise<void>;
   reorderCoats: (bodyId: string, orderedIds: string[]) => Promise<void>;
   nextSeq: (bodyId: string) => number;
   /** 同器型自动带出上次漆种与间隔建议 */
   suggestForBody: (bodyId: string) => PaintSuggestion;
 }
+
+/** 已同步到的荫房记录 updatedAt（按胎体），避免放行后被无关记录改动反复置回待复检 */
+const syncedRoomAt: Record<string, number> = {};
 
 export const useCoatStore = create<CoatStoreState>((set, get) => ({
   coats: [],
@@ -103,11 +112,40 @@ export const useCoatStore = create<CoatStoreState>((set, get) => ({
     await get().updateCoat(id, { state: next });
   },
 
-  async markRecheck(bodyId, recheck) {
-    const affected = get().coats.filter((coat) => coat.bodyId === bodyId && coat.state !== 'done');
+  async syncRecheckFromRooms() {
+    // 只读荫房记录，只写自己侧（道次）
+    const rooms = useRoomStore.getState().rooms;
+    const coats = get().coats;
+    // 道次尚未载入时不记高水位，避免「荫房先于道次载入」导致漏同步
+    if (coats.length === 0) return;
+    const now = Date.now();
+    const latestByBody = new Map<string, (typeof rooms)[number]>();
+    rooms.forEach((room) => {
+      const prev = latestByBody.get(room.bodyId);
+      if (!prev || room.updatedAt > prev.updatedAt) latestByBody.set(room.bodyId, room);
+    });
+
+    const toSet: Coat[] = [];
+    latestByBody.forEach((room, bodyId) => {
+      const synced = syncedRoomAt[bodyId] ?? 0;
+      if (room.updatedAt <= synced) return;
+      syncedRoomAt[bodyId] = room.updatedAt;
+      if (room.verdict === 'suitable') return;
+      coats
+        .filter((coat) => coat.bodyId === bodyId && coat.state !== 'done' && !coat.needRecheck)
+        .forEach((coat) => toSet.push({ ...coat, needRecheck: true, updatedAt: now }));
+    });
+
+    if (toSet.length === 0) return;
+    await db.coats.bulkPut(toSet);
+    await get().loadCoats();
+  },
+
+  async releaseRecheck(bodyId) {
+    const affected = get().coats.filter((coat) => coat.bodyId === bodyId && coat.needRecheck);
     if (affected.length === 0) return;
     const now = Date.now();
-    await db.coats.bulkPut(affected.map((coat) => ({ ...coat, needRecheck: recheck, updatedAt: now })));
+    await db.coats.bulkPut(affected.map((coat) => ({ ...coat, needRecheck: false, updatedAt: now })));
     await get().loadCoats();
   },
 
@@ -149,6 +187,14 @@ export const useCoatStore = create<CoatStoreState>((set, get) => ({
     };
   },
 }));
+
+/**
+ * 荫房侧记录变化时，髹涂组侧自行同步待复检（只读荫房记录，只写道次）。
+ * 不反向：荫房值班不写髹涂道次。
+ */
+useRoomStore.subscribe(() => {
+  void useCoatStore.getState().syncRecheckFromRooms();
+});
 
 /** 道次派生选择器：按状态集合过滤 */
 export function selectCoatsByStates(coats: Coat[], states: CoatState[]): Coat[] {
